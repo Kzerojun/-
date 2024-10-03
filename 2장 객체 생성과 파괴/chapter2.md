@@ -90,4 +90,216 @@ public Object pop() {
 
 ### 5. 메모리 누수가 자주 발생하는 사례
 - **캐시**: 사용이 끝난 객체가 캐시에 남아 있으면 메모리 누수가 발생합니다. 이를 방지하기 위해 약한 참조(Weak Reference)나 **정기적인 캐시 청소** 기법을 사용할 수 있습니다.
-- **리스너 혹은 콜백**: 리스너를 등록하고 해지하지 않는다면, 계속 메모리를 차지하게 되어 누수가 발생합니다. 이를 방지하기 위해 **약한 참조(Weak Reference)**로 관리하면, 가비지 컬렉터가 참조되지 않은 콜백을 회수할 수 있습니다.
+- **리스너 혹은 콜백**: 리스너를 등록하고 해지하지 않는다면, 계속 메모리를 차지하게 되어 누수가 발생합니다. 이를 방지하기 위해 약한 참조(Weak Reference)로 관리하면, 가비지 컬렉터가 참조되지 않은 콜백을 회수할 수 있습니다.
+
+# finalizer와 cleaner 사용을 피하라
+
+자바는 객체 소멸자를 두 가지 제공합니다: **finalizer**와 **cleaner**.  
+이 두 방법 모두 **예측할 수 없고, 성능 저하**와 **오동작**을 일으킬 수 있어 **일반적으로 사용을 권장하지 않습니다**.
+
+## finalizer의 문제점
+- **예측 불가**: `finalizer`가 언제 실행될지 보장할 수 없습니다. 자원이 즉시 회수되어야 하는 상황에서 사용하면 시스템 자원을 고갈시키고, 프로그램이 실패할 수 있습니다.
+- **낮은 성능**: `finalizer`를 사용하면 객체를 생성하고 파괴하는 시간이 매우 느립니다. 가비지 컬렉터의 효율도 떨어집니다.
+- **오동작 가능성**: `finalizer` 동작 중 예외가 발생하면 경고 없이 무시되고, 객체가 불완전한 상태로 남아 문제가 발생할 수 있습니다.
+- **보안 취약점**: `finalizer` 공격을 통해 악의적인 하위 클래스가 비정상적인 동작을 할 수 있습니다.
+
+## cleaner의 문제점
+- **finalizer보다 덜 위험하지만** 여전히 예측할 수 없고 느립니다. 또한 `cleaner`도 가비지 컬렉터에 의존하여 즉시 실행되지 않을 수 있습니다.
+- **백그라운드에서 실행**되며, 프로그램의 상태나 자원 회수에 대한 즉각적인 보장이 없습니다.
+
+## 대안: AutoCloseable과 try-with-resources
+- **AutoCloseable**을 구현하고 **try-with-resources**를 사용하여 자원을 명시적으로 해제하는 것이 좋습니다.
+- 자원이 더 이상 필요 없을 때 `close()` 메서드를 호출하여 즉시 자원을 회수할 수 있습니다.
+- `close()` 메서드에서는 객체가 닫혔는지 추적하는 필드를 두어, 닫힌 객체를 사용하려 할 때 `IllegalStateException`을 던지도록 하는 것이 좋습니다.
+
+## finalizer와 cleaner의 적절한 사용 사례
+- **안전망 역할**: 클라이언트가 자원을 명시적으로 해제하지 않았을 때 `cleaner`나 `finalizer`를 통해 **늦게라도 자원을 회수**하는 것이 도움이 될 수 있습니다.
+- **네이티브 피어와 연결된 객체**: 자바 객체가 네이티브 메서드를 호출하는 경우, 가비지 컬렉터는 네이티브 자원을 회수하지 않으므로 `cleaner`나 `finalizer`를 사용해 네이티브 자원을 회수할 수 있습니다.
+
+```java
+// cleaner를 사용하는 예시
+public class Room implements AutoCloseable {
+    private static final Cleaner cleaner = Cleaner.create();
+
+    private static class State implements Runnable {
+        int numJunkPiles;
+
+        State(int numJunkPiles) {
+            this.numJunkPiles = numJunkPiles;
+        }
+
+        @Override
+        public void run() {
+            System.out.println("방 청소");
+            numJunkPiles = 0;
+        }
+    }
+
+    private final State state;
+    private final Cleaner.Cleanable cleanable;
+
+    public Room(int numJunkPiles) {
+        state = new State(numJunkPiles);
+        cleanable = cleaner.register(this, state);
+    }
+
+    @Override
+    public void close() {
+        cleanable.clean();
+    }
+}
+```
+
+## 결론
+finalizer와 cleaner는 일반적으로 피하는 것이 좋습니다.  
+자원을 명시적으로 해제할 수 있도록 AutoCloseable과 try-with-resources를 사용하는 것이 훨씬 안전하고 효율적입니다.
+
+# try-with-resources를 사용하라
+
+자바 라이브러리에는 `close` 메서드를 호출해 **직접 닫아야 하는 자원**이 많습니다.  
+예를 들어, `InputStream`, `OutputStream`, `java.sql.Connection` 등이 있습니다.  
+이러한 자원은 **제대로 닫히지 않으면 예측할 수 없는 성능 문제**로 이어질 수 있습니다.
+
+## 전통적인 자원 회수 방식: try-finally
+- 자원을 닫기 위해 **전통적으로** `try-finally`를 사용했습니다.
+- 자원을 하나만 다룰 때는 괜찮지만, **여러 자원**을 다룰 때는 코드가 복잡하고 **가독성이 떨어집니다**.
+
+```java
+// 자원이 하나인 경우 - 전통적인 try-finally 방식
+static String firstLineOfFile(String path) throws IOException {
+    BufferedReader br = new BufferedReader(new FileReader(path));
+    try {
+        return br.readLine();
+    } finally {
+        br.close();
+    }
+}
+
+// 자원이 둘 이상인 경우 - 복잡해지는 try-finally 방식
+static void copy(String src, String dst) throws IOException {
+    InputStream in = new FileInputStream(src);
+    try {
+        OutputStream out = new FileOutputStream(dst);
+        try {
+            byte[] buf = new byte[BUFFER_SIZE];
+            int n;
+            while ((n = in.read(buf)) >= 0)
+                out.write(buf, 0, n);
+        } finally {
+            out.close();
+        }
+    } finally {
+        in.close();
+    }
+}
+```
+
+## 해결 방안: try-with-resources (자바 7 도입)
+- **try-with-resources**를 사용하면 `AutoCloseable` 인터페이스를 구현한 자원을 자동으로 닫을 수 있습니다.
+- `try-with-resources`는 코드가 더 **간결하고 가독성**이 좋으며, **자원을 안전하게 해제**할 수 있는 최선의 방법입니다.
+
+```java
+// try-with-resources를 사용한 예시
+static String firstLineOfFile(String path) throws IOException {
+    try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+        return br.readLine();
+    }
+}
+
+// 여러 자원을 try-with-resources로 처리하는 예시
+static void copy(String src, String dst) throws IOException {
+    try (InputStream in = new FileInputStream(src);
+         OutputStream out = new FileOutputStream(dst)) {
+        byte[] buf = new byte[BUFFER_SIZE];
+        int n;
+        while ((n = in.read(buf)) >= 0)
+            out.write(buf, 0, n);
+    }
+}
+```
+
+# Java의 참조 유형 4가지
+
+Java에서는 객체를 참조하는 방식에 따라 **강한 참조(Strong Reference)**, **소프트 참조(Soft Reference)**, **약한 참조(Weak Reference)**, **팬텀 참조(Phantom Reference)**라는 네 가지 참조 유형을 제공합니다. 각 참조 유형은 **가비지 컬렉션(GC)**이 객체를 수거하는 시점과 방식에 차이가 있습니다. 이 글에서는 각 참조 유형의 특성과 동작을 설명합니다.
+
+---
+
+## 1. 강한 참조 (Strong Reference)
+
+**강한 참조**는 Java에서 가장 일반적인 참조 유형으로, 변수나 객체가 직접 참조될 때 사용됩니다.
+강한 참조가 있는 객체는 가비지 컬렉터에 의해 수거되지 않으며, 해당 객체는 여전히 사용 가능한 상태로 간주됩니다.
+
+### 특징:
+- **기본적인 참조**: 자바의 모든 객체 참조는 기본적으로 강한 참조입니다.
+- **GC의 대상 아님**: 강한 참조가 존재하는 한, 객체는 절대 가비지 컬렉션의 대상이 되지 않습니다.
+- **예시**:
+    ```java
+    Object obj = new Object(); // obj는 강한 참조를 가짐
+    ```
+
+### 사용 사례:
+- 객체가 프로그램의 전체 실행 중 계속 유지되어야 하는 경우, 강한 참조를 사용합니다.
+
+---
+
+## 2. 소프트 참조 (Soft Reference)
+
+**소프트 참조**는 메모리 부족 시에만 가비지 컬렉터가 수거할 수 있는 참조 유형입니다. 메모리 부족이 발생하지 않는다면 소프트 참조된 객체는 유지됩니다. 따라서 메모리가 부족해지기 전까지 객체를 캐싱하는 데 유용합니다.
+
+### 특징:
+- **메모리 부족 시 GC 대상**: 메모리가 부족할 때만 가비지 컬렉션의 대상이 됩니다.
+- **캐싱에 적합**: 메모리가 넉넉할 때는 객체를 계속 유지하다가 메모리가 부족할 때만 수거됩니다.
+- **예시**:
+    ```java
+    SoftReference<Object> softRef = new SoftReference<>(new Object());
+    ```
+
+### 사용 사례:
+- **캐시 구현**: 필요할 때 메모리를 확보하면서도, 메모리가 충분할 경우 객체를 계속 유지하려는 상황에서 소프트 참조를 사용합니다.
+
+---
+
+## 3. 약한 참조 (Weak Reference)
+
+**약한 참조**는 가비지 컬렉터가 객체를 언제든지 수거할 수 있는 참조 유형입니다. 약한 참조가 걸린 객체는 더 이상 강한 참조를 받지 않으면 즉시 가비지 컬렉션의 대상이 됩니다.
+
+### 특징:
+- **GC의 즉시 대상**: 더 이상 강한 참조가 없으면 즉시 가비지 컬렉션 대상이 됩니다.
+- **WeakHashMap**에서 사용**: Java의 `WeakHashMap`에서 약한 참조가 활용됩니다. 강한 참조가 없어지면 키와 값이 모두 수거됩니다.
+- **예시**:
+    ```java
+    WeakReference<Object> weakRef = new WeakReference<>(new Object());
+    ```
+
+### 사용 사례:
+- **WeakHashMap**: 캐시나 자주 사용하지 않는 데이터에 대한 참조를 관리할 때 `WeakHashMap`과 함께 사용됩니다.
+
+---
+
+## 4. 팬텀 참조 (Phantom Reference)
+
+**팬텀 참조**는 객체가 가비지 컬렉션에 수거된 이후에도, 그 객체의 참조를 추적할 수 있게 해주는 참조 유형입니다. 팬텀 참조는 객체가 메모리에서 해제된 후 최종적으로 정리할 작업을 처리하는 데 사용됩니다.
+
+### 특징:
+- **GC 후 참조 가능**: 객체가 실제 메모리에서 해제된 후에 참조할 수 있습니다.
+- **사용 시점**: 팬텀 참조는 주로 객체가 가비지 컬렉션된 후의 추가 작업(예: 리소스 해제)을 위해 사용됩니다.
+- **예시**:
+    ```java
+    PhantomReference<Object> phantomRef = new PhantomReference<>(new Object(), referenceQueue);
+    ```
+
+### 사용 사례:
+- **리소스 해제**: 파일 핸들, 데이터베이스 연결 등 객체가 메모리에서 사라진 후 추가적으로 정리해야 할 리소스 해제 작업이 있을 때 사용됩니다.
+
+---
+
+## 요약
+
+| 참조 유형        | 가비지 컬렉션 대상 여부                      | 사용 사례                 |
+|-----------------|-------------------------------------------|---------------------------|
+| **강한 참조**     | 강한 참조가 있는 한 절대 수거되지 않음         | 일반적인 객체 참조           |
+| **소프트 참조**   | 메모리 부족 시 가비지 컬렉션 대상               | 캐시                       |
+| **약한 참조**     | 강한 참조가 없으면 즉시 가비지 컬렉션 대상      | WeakHashMap                |
+| **팬텀 참조**     | 가비지 컬렉션 후에도 참조 가능, 후처리 작업 필요  | 객체 소멸 후 리소스 정리 작업  |
+
+이 네 가지 참조 유형을 활용하여 객체의 수명과 메모리 관리를 유연하게 조절할 수 있습니다. 특히 메모리 효율성을 중시하는 애플리케이션에서는 참조 유형을 적절하게 활용하는 것이 중요합니다.
